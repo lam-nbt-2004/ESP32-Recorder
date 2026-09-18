@@ -10,7 +10,7 @@
 #define SPI_SCK       18
 
 #define BUTTON_PIN     4
-#define LED_ONBOARD    2  // LED tích hợp sẵn trên ESP32 DevKit V1
+#define LED_ONBOARD    2 
 
 #define I2S_PORT       I2S_NUM_0
 
@@ -48,13 +48,18 @@ State currentState = IDLE;
 
 File recFile;
 uint32_t totalDataBytes = 0;
+bool isI2SInstalled = false; // Cờ kiểm tra tránh warning khi uninstall I2S
 
 // Khai báo trước nguyên mẫu hàm
 void playRecording();
 
 // Khởi tạo I2S cho Micro INMP441 (Ghi âm)
 void initI2S_Micro() {
-    i2s_driver_uninstall(I2S_PORT);
+    if (isI2SInstalled) {
+        i2s_driver_uninstall(I2S_PORT);
+        isI2SInstalled = false;
+    }
+
     i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
         .sample_rate = SAMPLE_RATE,
@@ -66,19 +71,26 @@ void initI2S_Micro() {
         .dma_buf_len = 512,
         .use_apll = false
     };
+
     i2s_pin_config_t pin_config = {
         .bck_io_num = I2S_MIC_BCLK,
         .ws_io_num = I2S_MIC_WS,
         .data_out_num = I2S_PIN_NO_CHANGE,
         .data_in_num = I2S_MIC_DIN
     };
+
     i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
     i2s_set_pin(I2S_PORT, &pin_config);
+    isI2SInstalled = true;
 }
 
 // Khởi tạo I2S cho MAX98357A (Phát loa)
 void initI2S_Loa(uint32_t sampleRate) {
-    i2s_driver_uninstall(I2S_PORT);
+    if (isI2SInstalled) {
+        i2s_driver_uninstall(I2S_PORT);
+        isI2SInstalled = false;
+    }
+
     i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
         .sample_rate = sampleRate,
@@ -90,14 +102,17 @@ void initI2S_Loa(uint32_t sampleRate) {
         .dma_buf_len = 512,
         .use_apll = false
     };
+
     i2s_pin_config_t pin_config = {
         .bck_io_num = I2S_LOA_BCLK,
         .ws_io_num = I2S_LOA_LRC,
         .data_out_num = I2S_LOA_DOUT,
         .data_in_num = I2S_PIN_NO_CHANGE
     };
+
     i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
     i2s_set_pin(I2S_PORT, &pin_config);
+    isI2SInstalled = true;
 }
 
 void startRecording() {
@@ -131,7 +146,10 @@ void stopRecording() {
     recFile.write((uint8_t*)&header, sizeof(WAVHeader));
     recFile.close();
 
-    i2s_driver_uninstall(I2S_PORT);
+    if (isI2SInstalled) {
+        i2s_driver_uninstall(I2S_PORT);
+        isI2SInstalled = false;
+    }
     currentState = IDLE;
 
     // Nhấp nháy LED nhanh trong 5 giây chờ
@@ -149,7 +167,7 @@ void playRecording() {
     Serial.println(F(">>> PHÁT LẠI FILE GHI ÂM..."));
     File file = SD.open("/record.wav");
     if (!file) {
-        Serial.println(F("Lỗi mở file phát!"));
+        Serial.println(F("Lỗi mở file để phát!"));
         return;
     }
 
@@ -166,9 +184,11 @@ void playRecording() {
 
     while (file.available()) {
         bytesRead = file.read(buffer, sizeof(buffer));
+
+        // Truyền thẳng dữ liệu âm thanh từ thẻ SD sang I2S (Không qua xử lý phần mềm)
         i2s_write(I2S_PORT, buffer, bytesRead, &bytesWritten, portMAX_DELAY);
 
-        // Nhấp nháy LED chậm (500ms) khi PHÁT LOA
+        // Nhấp nháy LED khi đang phát loa
         if (millis() - lastBlink > 500) {
             lastBlink = millis();
             digitalWrite(LED_ONBOARD, !digitalRead(LED_ONBOARD));
@@ -176,7 +196,11 @@ void playRecording() {
     }
 
     file.close();
-    i2s_driver_uninstall(I2S_PORT);
+    if (isI2SInstalled) {
+        i2s_driver_uninstall(I2S_PORT);
+        isI2SInstalled = false;
+    }
+
     digitalWrite(LED_ONBOARD, LOW);
     currentState = IDLE;
     Serial.println(F(">>> PHÁT XONG!"));
@@ -201,8 +225,9 @@ void loop() {
     static bool lastBtnState = HIGH;
     bool btnState = digitalRead(BUTTON_PIN);
 
+    // Xử lý chống rung phím (Debounce)
     if (lastBtnState == HIGH && btnState == LOW) {
-        delay(50); // Debounce
+        delay(50);
         if (digitalRead(BUTTON_PIN) == LOW) {
             if (currentState == IDLE) {
                 startRecording();
@@ -213,6 +238,7 @@ void loop() {
     }
     lastBtnState = btnState;
 
+    // Ghi dữ liệu liên tục nếu ở trạng thái GHI ÂM
     if (currentState == RECORDING) {
         uint8_t i2sBuffer[512];
         size_t bytesRead = 0;
